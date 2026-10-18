@@ -1,0 +1,48 @@
+#!/bin/sh
+# cline-termux launcher — runs Cline CLI on Termux with Android-built libopentui.so
+# The preload module calls setRenderLibPath() so @opentui/core uses our .so
+# instead of looking for a (nonexistent) Android platform package.
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+LIBEXEC="$PREFIX/libexec/cline-termux"
+
+# Termux's node may need the C++ runtime for the .so
+export LD_LIBRARY_PATH="$LIBEXEC:${LD_LIBRARY_PATH:-}"
+
+# Find the global npm root for module resolution (preload needs @opentui/core)
+NPM_ROOT="$(npm root -g 2>/dev/null)"
+if [ -n "$NPM_ROOT" ]; then
+  export NODE_PATH="$NPM_ROOT:${NODE_PATH:-}"
+fi
+
+# Find the global cline installation
+CLINE_BIN=""
+for candidate in "$PREFIX/bin/cline" "$HOME/bin/cline" "$(npm root -g 2>/dev/null)/cline/dist/index.js"; do
+  if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    CLINE_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$CLINE_BIN" ]; then
+  echo "cline not found. Install it first: npm install -g cline" >&2
+  exit 1
+fi
+
+# If CLINE_BIN is a JS file, run it with node + preload.
+# If it's a shell wrapper (npm bin), extract the JS path or just use node --import.
+case "$CLINE_BIN" in
+  *.js)
+    exec node --import "$LIBEXEC/cline-preload.mjs" "$CLINE_BIN" "$@"
+    ;;
+  *)
+    # npm bin stub — run node directly on the dist entry
+    CLINE_JS="$(npm root -g 2>/dev/null)/cline/dist/index.js"
+    if [ -f "$CLINE_JS" ]; then
+      exec node --import "$LIBEXEC/cline-preload.mjs" "$CLINE_JS" "$@"
+    else
+      echo "Cannot locate cline JS entry. Tried: $CLINE_JS" >&2
+      exit 1
+    fi
+    ;;
+esac
