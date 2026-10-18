@@ -1,0 +1,34 @@
+# Android patches for OpenTUI v0.4.3 (used by Cline CLI's @opentui/core)
+# Apply to a fresh `git clone --branch v0.4.3 https://github.com/sst/opentui.git`
+# with: patch -p1 < opentui-0.4.3-android.patch
+
+--- a/packages/core/src/zig/build.zig
++++ b/packages/core/src/zig/build.zig
+@@ -190,8 +190,11 @@
+     switch (target.result.os.tag) {
+         .macos => addMacOSSystemLibraries(b, artifact, macos_sdk_path.?),
+         .linux => {
+-            artifact.linkSystemLibrary("dl");
+-            artifact.linkSystemLibrary("pthread");
++            // termux-android: bionic provides dl/pthread in libc; linking
++            // them explicitly breaks the Android build.
++            if (!target.result.abi.isAndroid()) {
++                artifact.linkSystemLibrary("dl");
++                artifact.linkSystemLibrary("pthread");
++            }
+         },
+         else => {},
+     }
+
+--- a/packages/core/src/zig/buffer.zig
++++ b/packages/core/src/zig/buffer.zig
+@@ -805,6 +805,10 @@
+     }
+ 
+     fn setCellWithAlphaBlendingCell(self: *OptimizedBuffer, x: u32, y: u32, cell: Cell) void {
++        // termux-android: guard against coordinates that don't fit in i32
++        // (can occur with unusual terminal sizes on Android; @intCast would panic)
++        if (x > std.math.maxInt(i32) or y > std.math.maxInt(i32)) return;
+         if (!self.isPointInScissor(@intCast(x), @intCast(y))) return;
+ 
+         const opacity = self.getCurrentOpacity();
