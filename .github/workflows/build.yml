@@ -1,0 +1,143 @@
+# Build Cline CLI natively for Android/Termux (aarch64).
+#
+# Produces cline-termux-android-aarch64.zip containing:
+#   - cline.bin (Bun-compiled Android binary with OPENTUI_LIB_PATH patch)
+#   - libopentui.so (Android-native, Zig-built for @opentui/core)
+#   - libc++_shared.so
+#   - cline (launcher script), install.sh
+#
+# Trigger: Actions tab -> "build" -> Run workflow.
+
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      cline_ref:
+        description: "Git ref of wirawira941/cline to build (branch, tag, or SHA)"
+        required: false
+        default: "termux-android"
+      opentui_version:
+        description: "OpenTUI version to build (must match @opentui/core used by cline)"
+        required: false
+        default: "0.4.3"
+      create_release:
+        description: "Attach the zip to a GitHub release"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cline-termux
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Setup Zig
+        run: |
+          curl -sL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz"
+          mkdir -p /tmp/zig && tar xf /tmp/zig.tar.xz -C /tmp/zig --strip-components=1
+          echo "/tmp/zig" >> "$GITHUB_PATH"
+
+      - name: Setup Android NDK
+        run: |
+          curl -sL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
+          mkdir -p /tmp/ndk && unzip -q /tmp/ndk.zip -d /tmp/ndk
+          echo "ANDROID_NDK=/tmp/ndk/android-ndk-r28c" >> "$GITHUB_ENV"
+
+      - name: Clone Cline
+        run: |
+          git clone --depth 1 --branch "${{ inputs.cline_ref }}" \
+            https://github.com/wirawira941/cline.git /tmp/cline-src
+
+      - name: Install Cline dependencies
+        working-directory: /tmp/cline-src
+        run: bun install --ignore-scripts
+
+      - name: Patch @opentui/core for OPENTUI_LIB_PATH
+        working-directory: /tmp/cline-src
+        run: |
+          for f in $(find node_modules/.bun -path "*@opentui/core/index-d5xqskty.js" 2>/dev/null); do
+            python3 - "$f" <<'EOF'
+          import sys
+          p = sys.argv[1]
+          t = open(p).read()
+          old = "var nativePackage = await resolveNativePackage();\nvar targetLibPath = nativePackage.default;"
+          new = """var targetLibPath = process.env.OPENTUI_LIB_PATH;
+          if (!targetLibPath) {
+            var nativePackage = await resolveNativePackage();
+            targetLibPath = nativePackage.default;
+          }"""
+          if old in t:
+              open(p, "w").write(t.replace(old, new))
+              print(f"patched {p}")
+          EOF
+          done
+
+      - name: Build libopentui.so for Android
+        env:
+          OPENTUI_VERSION: ${{ inputs.opentui_version }}
+        run: |
+          bash cline-termux/scripts/build-libopentui-android.sh
+          echo "DIST=$HOME/cline-termux-work/dist" >> "$GITHUB_ENV"
+
+      - name: Compile Cline CLI for Android
+        working-directory: /tmp/cline-src
+        run: |
+          cat > /tmp/build-cline-android.ts <<'EOF'
+          import { join, resolve } from "node:path";
+          const cliDir = "/tmp/cline-src/apps/cli";
+          const entrypoint = join(cliDir, "src/index.ts");
+          const outDir = "/tmp/cline-dist";
+          const outfile = join(outDir, "cline-android-arm64");
+          const { mkdirSync } = await import("node:fs");
+          mkdirSync(outDir, { recursive: true });
+          const result = await Bun.build({
+            entrypoints: [entrypoint],
+            compile: { target: "bun-android-arm64", outfile },
+            minify: true,
+            external: ["@anthropic-ai/vertex-sdk"],
+            define: { "process.env.NODE_ENV": '"production"' },
+            throw: false,
+          });
+          if (!result.success) {
+            for (const log of result.logs) console.error(log);
+            throw new Error("build failed");
+          }
+          console.log("built", outfile);
+          EOF
+          bun /tmp/build-cline-android.ts
+
+      - name: Assemble Termux package
+        run: |
+          PKG="${{ runner.temp }}/pkg"
+          mkdir -p "$PKG"
+          cp /tmp/cline-dist/cline-android-arm64 "$PKG/cline.bin"
+          cp "$DIST/libopentui.so" "$DIST/libc++_shared.so" "$PKG/"
+          cp cline-termux/termux/cline cline-termux/termux/install.sh "$PKG/"
+          chmod 755 "$PKG/cline" "$PKG/install.sh" "$PKG/cline.bin"
+          cd "$PKG" && zip -9 -r "${{ runner.temp }}/cline-termux-android-aarch64.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cline-termux-android-aarch64
+          path: ${{ runner.temp }}/cline-termux-android-aarch64.zip
+
+      - name: Create release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-${{ github.run_number }}
+          name: "cline-termux Android build #${{ github.run_number }}"
+          files: ${{ runner.temp }}/cline-termux-android-aarch64.zip
+          body: |
+            Native Android (aarch64) build of Cline CLI for Termux.
+            See README.md for install instructions.
