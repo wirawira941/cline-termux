@@ -36,7 +36,7 @@ if [ ! -d "$WORK/opentui-$OPENTUI_VERSION" ]; then
 fi
 
 # --- android patch: skip libdl/libpthread on bionic ---
-python3 - "$SRC/packages/core/src/zig/build.zig" <<'EOF'
+python3 - "$SRC/build.zig" <<'EOF'
 import sys
 p = sys.argv[1]
 t = open(p).read()
