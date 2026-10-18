@@ -57,6 +57,63 @@ else:
     print("libdl pattern not found (may already be patched)")
 EOF
 
+# --- android patch: guard against u32->i32 cast panic in buffer.zig ---
+# (can occur with unusual terminal sizes on Android; @intCast would panic
+# with "integer does not fit in destination type")
+python3 - "$SRC/buffer.zig" <<'EOF'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+old = '''    fn setCellWithAlphaBlendingCell(self: *OptimizedBuffer, x: u32, y: u32, cell: Cell) void {
+        if (!self.isPointInScissor(@intCast(x), @intCast(y))) return;'''
+new = '''    fn setCellWithAlphaBlendingCell(self: *OptimizedBuffer, x: u32, y: u32, cell: Cell) void {
+        // termux-android: guard against coordinates that don't fit in i32
+        if (x > std.math.maxInt(i32) or y > std.math.maxInt(i32)) return;
+        if (!self.isPointInScissor(@intCast(x), @intCast(y))) return;'''
+if old in t:
+    open(p, "w").write(t.replace(old, new))
+    print("buffer.zig i32-guard patch applied")
+else:
+    print("buffer.zig pattern not found (may already be patched)")
+EOF
+
+# --- zig dependencies: yoga + uucode workarounds ---
+# Zig's built-in fetch from GitHub often fails; handle manually.
+cd "$SRC"
+if [ ! -d "yoga-local" ]; then
+  echo "Cloning yoga for local path dependency..."
+  git clone --depth 1 --branch v3.2.1 https://github.com/facebook/yoga.git "$WORK/yoga-git"
+  ln -sfn "$WORK/yoga-git" "$SRC/yoga-local"
+  python3 - "$SRC/build.zig.zon" <<'EOF'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+# Replace git dependency with local path (absolute paths rejected by Zig,
+# so we use a relative symlink created above)
+old = '''        .yoga = .{
+            .url = "git+https://github.com/facebook/yoga#v3.2.1",
+            .hash = "N-V-__8AAOYl0gAU76B1VRPFD9AWvy2VkOef2jN0B3sISTeO",
+        },'''
+new = '''        .yoga = .{
+            .path = "yoga-local",
+        },'''
+if old in t:
+    open(p, "w").write(t.replace(old, new))
+    print("yoga switched to local path")
+else:
+    print("yoga pattern not found (may already be patched)")
+EOF
+fi
+# Pre-fetch uucode via curl (Zig's fetch often fails with HttpConnectionClosing)
+if [ ! -f "$WORK/uucode.tar.gz" ]; then
+  echo "Downloading uucode tarball..."
+  curl -sL -o "$WORK/uucode.tar.gz" "https://github.com/jacobsandlund/uucode/archive/84ceda8561a17ba4a9b96ac5c583f779660bbd4e.tar.gz"
+fi
+# Prime Zig's cache with the local tarball (avoids network fetch failures)
+cd "$SRC" && "$ZIG" fetch --global-cache-dir "$WORK/zig-cache" "$WORK/uucode.tar.gz" 2>/dev/null || \
+  "$ZIG" fetch "$WORK/uucode.tar.gz" || echo "::warning::uucode pre-fetch failed, will retry during build"
+export ZIG_GLOBAL_CACHE_DIR="$WORK/zig-cache"
+
 # --- bionic sysroot ---
 NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 BIONIC_INC="$WORK/bionic-include"
