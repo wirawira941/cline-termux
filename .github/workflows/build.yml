@@ -61,6 +61,11 @@ jobs:
         working-directory: /tmp/cline-src
         run: bun install --ignore-scripts
 
+      - name: Build SDK packages
+        working-directory: /tmp/cline-src
+        run: bun run build:sdk
+
+
       - name: Patch @opentui/core for OPENTUI_LIB_PATH
         working-directory: /tmp/cline-src
         run: |
